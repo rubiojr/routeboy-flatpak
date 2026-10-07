@@ -1,0 +1,6 @@
+/dist/
+/.flatpak-builder/
+/build-dir/
+/repo/
+/routeboy-source.tar.gz
+*.flatpak

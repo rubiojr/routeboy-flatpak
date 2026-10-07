@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Build a local bundle from a Routeboy checkout.
+set -euo pipefail
+
+packaging=$(cd "$(dirname "$0")" && pwd)
+
+usage() {
+	cat <<'EOF'
+Usage: scripts/flatpak [--sources-only]
+
+Builds dist/co.rbel.routeboy.flatpak for the host architecture.
+--sources-only prepares the vendored source archive and manifest without building.
+
+ROUTEBOY  Routeboy checkout (defaults to the enclosing checkout)
+OUT       Output directory (defaults to Routeboy's dist/)
+EOF
+}
+
+die() {
+	echo "flatpak: $*" >&2
+	exit 1
+}
+
+sources_only=false
+case ${1:-} in
+--sources-only) sources_only=true ;;
+-h|--help) usage; exit 0 ;;
+"") ;;
+*) usage >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+
+app=$(cd "${ROUTEBOY:-$packaging/..}" && pwd)
+out=${OUT:-$app/dist}
+work=$out/flatpak
+
+if [ ! -f "$app/go.mod" ] || ! grep -qx 'module github.com/rubiojr/routeboy' "$app/go.mod"; then
+	die "set ROUTEBOY to a Routeboy checkout, see README.md"
+fi
+for asset in desktop metainfo.xml svg; do
+	[ -f "$app/assets/co.rbel.routeboy.$asset" ] ||
+		die "missing $app/assets/co.rbel.routeboy.$asset"
+done
+
+tools=(git go tar)
+if ! "$sources_only"; then
+	tools+=(flatpak flatpak-builder)
+fi
+for tool in "${tools[@]}"; do
+	command -v "$tool" >/dev/null || die "install $tool first"
+done
+
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+out=$(cd "$out" && pwd)
+manifest=$work/co.rbel.routeboy.yml
+stage=$(mktemp -d "$work/source.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+
+# Include working-tree changes while leaving Git data and build output behind.
+snapshot() {
+	local source=$1 dest=$2
+	shift 2
+	mkdir -p "$dest"
+	git -C "$source" ls-files --cached --others --exclude-standard -z |
+		while IFS= read -r -d '' file; do
+			if [ -e "$source/$file" ] || [ -L "$source/$file" ]; then
+				printf '%s\0' "$file"
+			fi
+		done |
+		tar -C "$source" --exclude=.git --exclude=.claude --exclude='*.swp' "$@" \
+			--null -T - -cf - |
+		tar -C "$dest" -xf -
+}
+
+snapshot "$app" "$stage/routeboy" --exclude=flatpak --exclude=dist --exclude=routeboy
+GOWORK=off go -C "$stage/routeboy" mod vendor
+tar -C "$stage" -czf "$work/routeboy-source.tar.gz" routeboy
+cp "$packaging/co.rbel.routeboy.yml" "$manifest"
+
+if "$sources_only"; then
+	echo "flatpak: sources and manifest in $work"
+	exit 0
+fi
+
+flatpak-builder --user --install-deps-from=flathub --assumeyes --force-clean \
+	--state-dir="$work/.flatpak-builder" --repo="$work/repo" "$work/build-dir" "$manifest"
+flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+	"$work/repo" "$out/co.rbel.routeboy.flatpak" co.rbel.routeboy stable
+
+echo "flatpak: $out/co.rbel.routeboy.flatpak"
+echo "Install: flatpak install --user $out/co.rbel.routeboy.flatpak"
